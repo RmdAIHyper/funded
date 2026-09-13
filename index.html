@@ -572,7 +572,7 @@ function animateValue(el, to, opts){
 }
 
 /* ============================================================
-   SELF-CONTAINED CANVAS CHARTS — no external dependency
+   SELF-CONTAINED CANVAS CHARTS — no external dependency, with mouse-tracking tooltips
    ============================================================ */
 function setupCanvas(canvas){
   const dpr = window.devicePixelRatio || 1;
@@ -599,12 +599,42 @@ function noDataMsg(ctx,width,height,text){
   ctx.fillText(text||"No data yet", width/2, height/2);
   ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
 }
+function lightenColor(hex){
+  hex = String(hex).replace("#","");
+  if (hex.length!==6) return hex;
+  const r=parseInt(hex.slice(0,2),16), g=parseInt(hex.slice(2,4),16), b=parseInt(hex.slice(4,6),16);
+  const f=(c)=>Math.min(255, Math.round(c+(255-c)*0.3));
+  return "rgb("+f(r)+","+f(g)+","+f(b)+")";
+}
+function ensureChartTooltip(){
+  let el = document.getElementById("chartTooltip");
+  if (!el){
+    el = document.createElement("div");
+    el.id = "chartTooltip";
+    el.style.cssText = "position:fixed;pointer-events:none;background:#16161a;border:1px solid #2c2c32;border-radius:8px;padding:6px 11px;font-size:11.5px;line-height:1.5;color:#f5f5f7;z-index:300;display:none;white-space:nowrap;box-shadow:0 10px 26px rgba(0,0,0,0.45);";
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function showChartTooltip(clientX, clientY, html){
+  const el = ensureChartTooltip();
+  el.innerHTML = html;
+  el.style.display = "block";
+  let left = clientX + 16, top = clientY + 16;
+  const rect = el.getBoundingClientRect();
+  if (left + rect.width > window.innerWidth - 8) left = clientX - rect.width - 16;
+  if (top + rect.height > window.innerHeight - 8) top = clientY - rect.height - 16;
+  el.style.left = left+"px";
+  el.style.top = top+"px";
+}
+function hideChartTooltip(){ const el = document.getElementById("chartTooltip"); if (el) el.style.display = "none"; }
+
 function drawEquityChart(canvasId, curve, currency){
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
-  const { ctx, width, height } = setupCanvas(canvas);
   const values = curve.map(c=>c.balance);
-  if (values.length < 2){ noDataMsg(ctx,width,height,"Add trades or a deposit to see your equity curve"); return; }
+  const { ctx, width, height } = setupCanvas(canvas);
+  if (values.length < 2){ noDataMsg(ctx,width,height,"Add trades or a deposit to see your equity curve"); canvas.onmousemove=null; canvas.onmouseleave=null; return; }
   const pad = { top:14, right:14, bottom:10, left:52 };
   const plotW = width-pad.left-pad.right, plotH = height-pad.top-pad.bottom;
   const min = Math.min(...values), max = Math.max(...values);
@@ -613,67 +643,106 @@ function drawEquityChart(canvasId, curve, currency){
   const x = (i)=> pad.left + (i/(values.length-1))*plotW;
   const y = (v)=> pad.top + plotH - ((v-lo)/span)*plotH;
 
-  ctx.strokeStyle = "#1f1f24"; ctx.lineWidth = 1; ctx.fillStyle = "#6b6b73"; ctx.font = "10px Inter, sans-serif";
-  const steps = 4;
-  for (let s=0; s<=steps; s++){
-    const v = lo + (span*s/steps);
-    const yy = y(v);
-    ctx.beginPath(); ctx.moveTo(pad.left,yy); ctx.lineTo(width-pad.right,yy); ctx.stroke();
-    ctx.fillText(niceAxisValue(v,true,currency), 2, yy+3);
+  function renderFrame(hoverIdx){
+    ctx.clearRect(0,0,width,height);
+    ctx.strokeStyle = "#1f1f24"; ctx.lineWidth = 1; ctx.fillStyle = "#6b6b73"; ctx.font = "10px Inter, sans-serif";
+    const steps = 4;
+    for (let s=0; s<=steps; s++){
+      const v = lo + (span*s/steps);
+      const yy = y(v);
+      ctx.beginPath(); ctx.moveTo(pad.left,yy); ctx.lineTo(width-pad.right,yy); ctx.stroke();
+      ctx.fillText(niceAxisValue(v,true,currency), 2, yy+3);
+    }
+    ctx.beginPath(); ctx.moveTo(x(0), y(values[0]));
+    values.forEach((v,i)=>{ if(i>0) ctx.lineTo(x(i), y(v)); });
+    ctx.lineTo(x(values.length-1), pad.top+plotH); ctx.lineTo(x(0), pad.top+plotH); ctx.closePath();
+    const grad = ctx.createLinearGradient(0,pad.top,0,pad.top+plotH);
+    grad.addColorStop(0,"rgba(255,61,122,0.35)"); grad.addColorStop(1,"rgba(255,61,122,0)");
+    ctx.fillStyle = grad; ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x(0), y(values[0]));
+    values.forEach((v,i)=>{ if(i>0) ctx.lineTo(x(i), y(v)); });
+    ctx.strokeStyle = "#ff3d7a"; ctx.lineWidth = 2; ctx.lineJoin="round"; ctx.stroke();
+    if (hoverIdx==null){
+      const lastX = x(values.length-1), lastY = y(values[values.length-1]);
+      ctx.beginPath(); ctx.arc(lastX,lastY,3.5,0,Math.PI*2); ctx.fillStyle="#ff3d7a"; ctx.fill();
+    } else {
+      const hx = x(hoverIdx), hy = y(values[hoverIdx]);
+      ctx.save(); ctx.strokeStyle = "rgba(255,255,255,0.28)"; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(hx,pad.top); ctx.lineTo(hx,pad.top+plotH); ctx.stroke(); ctx.restore();
+      ctx.beginPath(); ctx.arc(hx,hy,5.5,0,Math.PI*2); ctx.fillStyle="#0c0c0e"; ctx.fill();
+      ctx.beginPath(); ctx.arc(hx,hy,3.5,0,Math.PI*2); ctx.fillStyle="#ff3d7a"; ctx.fill();
+    }
   }
-  // area fill
-  ctx.beginPath(); ctx.moveTo(x(0), y(values[0]));
-  values.forEach((v,i)=>{ if(i>0) ctx.lineTo(x(i), y(v)); });
-  ctx.lineTo(x(values.length-1), pad.top+plotH); ctx.lineTo(x(0), pad.top+plotH); ctx.closePath();
-  const grad = ctx.createLinearGradient(0,pad.top,0,pad.top+plotH);
-  grad.addColorStop(0,"rgba(255,61,122,0.35)"); grad.addColorStop(1,"rgba(255,61,122,0)");
-  ctx.fillStyle = grad; ctx.fill();
-  // line
-  ctx.beginPath(); ctx.moveTo(x(0), y(values[0]));
-  values.forEach((v,i)=>{ if(i>0) ctx.lineTo(x(i), y(v)); });
-  ctx.strokeStyle = "#ff3d7a"; ctx.lineWidth = 2; ctx.lineJoin="round"; ctx.stroke();
-  // end dot
-  const lastX = x(values.length-1), lastY = y(values[values.length-1]);
-  ctx.beginPath(); ctx.arc(lastX,lastY,3.5,0,Math.PI*2); ctx.fillStyle="#ff3d7a"; ctx.fill();
+  renderFrame(null);
+  canvas.onmousemove = function(e){
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    let nearest = 0, minD = Infinity;
+    values.forEach((v,i)=>{ const d = Math.abs(x(i)-mx); if (d<minD){ minD=d; nearest=i; } });
+    renderFrame(nearest);
+    showChartTooltip(e.clientX, e.clientY, "<strong>"+esc(curve[nearest].date)+"</strong><br>"+fmtMoney(values[nearest], currency));
+  };
+  canvas.onmouseleave = function(){ renderFrame(null); hideChartTooltip(); };
 }
+
 function drawBarChart(canvasId, labels, values, colorFn, opts){
   opts = opts || {};
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
   const { ctx, width, height } = setupCanvas(canvas);
-  if (!values.length || values.every(v=>!v)){ noDataMsg(ctx,width,height); return; }
+  if (!values.length || values.every(v=>!v)){ noDataMsg(ctx,width,height); canvas.onmousemove=null; canvas.onmouseleave=null; return; }
   const pad = { top:14, right:10, bottom:22, left:44 };
   const plotW = width-pad.left-pad.right, plotH = height-pad.top-pad.bottom;
   const maxAbs = Math.max(1, ...values.map(v=>Math.abs(v)));
   const hasNeg = values.some(v=>v<0);
   const zeroY = hasNeg ? pad.top + plotH/2 : pad.top + plotH;
   const scale = hasNeg ? (plotH/2)/maxAbs : plotH/maxAbs;
-
-  ctx.strokeStyle = "#1f1f24"; ctx.lineWidth = 1; ctx.fillStyle = "#6b6b73"; ctx.font = "10px Inter, sans-serif";
-  const gridLines = hasNeg ? [pad.top, zeroY, pad.top+plotH] : [pad.top, pad.top+plotH/2, pad.top+plotH];
-  gridLines.forEach(gy=>{ ctx.beginPath(); ctx.moveTo(pad.left,gy); ctx.lineTo(width-pad.right,gy); ctx.stroke(); });
-  ctx.fillText(niceAxisValue(hasNeg?0:maxAbs, opts.money, opts.currency), 2, gridLines[0]+3);
-  if (hasNeg) ctx.fillText(niceAxisValue(0, opts.money, opts.currency), 2, zeroY+3);
-
   const n = values.length;
   const slot = plotW/n;
   const barW = Math.min(34, slot*0.55);
-  values.forEach((v,i)=>{
+  const bars = values.map((v,i)=>{
     const cx = pad.left + slot*i + slot/2;
     const barH = Math.abs(v)*scale;
     const barY = v>=0 ? zeroY-barH : zeroY;
-    ctx.fillStyle = colorFn ? colorFn(v,i) : "#ff3d7a";
-    ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(cx-barW/2, barY, barW, Math.max(barH,1.5), 3); else ctx.rect(cx-barW/2, barY, barW, Math.max(barH,1.5));
-    ctx.fill();
-    if (labels[i] !== undefined){
-      ctx.fillStyle = "#6b6b73"; ctx.font = "9.5px Inter, sans-serif"; ctx.textAlign = "center";
-      const lbl = String(labels[i]).length>6 ? String(labels[i]).slice(0,6) : labels[i];
-      ctx.fillText(lbl, cx, height-6);
-      ctx.textAlign = "left";
-    }
+    return { cx, barY, barH: Math.max(barH,1.5), v, label: labels[i] };
   });
+
+  function renderFrame(hoverIdx){
+    ctx.clearRect(0,0,width,height);
+    ctx.strokeStyle = "#1f1f24"; ctx.lineWidth = 1; ctx.fillStyle = "#6b6b73"; ctx.font = "10px Inter, sans-serif";
+    const gridLines = hasNeg ? [pad.top, zeroY, pad.top+plotH] : [pad.top, pad.top+plotH/2, pad.top+plotH];
+    gridLines.forEach(gy=>{ ctx.beginPath(); ctx.moveTo(pad.left,gy); ctx.lineTo(width-pad.right,gy); ctx.stroke(); });
+    ctx.fillText(niceAxisValue(hasNeg?0:maxAbs, opts.money, opts.currency), 2, gridLines[0]+3);
+    if (hasNeg) ctx.fillText(niceAxisValue(0, opts.money, opts.currency), 2, zeroY+3);
+    bars.forEach((b,i)=>{
+      const baseColor = colorFn ? colorFn(b.v,i) : "#ff3d7a";
+      ctx.fillStyle = i===hoverIdx ? lightenColor(baseColor.startsWith("#")?baseColor:"#ff3d7a") : baseColor;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(b.cx-barW/2, b.barY, barW, b.barH, 3); else ctx.rect(b.cx-barW/2, b.barY, barW, b.barH);
+      ctx.fill();
+      if (i===hoverIdx){ ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 1.5; ctx.stroke(); }
+      if (b.label !== undefined){
+        ctx.fillStyle = i===hoverIdx ? "#f5f5f7" : "#6b6b73"; ctx.font = "9.5px Inter, sans-serif"; ctx.textAlign = "center";
+        const lbl = String(b.label).length>6 ? String(b.label).slice(0,6) : b.label;
+        ctx.fillText(lbl, b.cx, height-6);
+        ctx.textAlign = "left";
+      }
+    });
+  }
+  renderFrame(null);
+  canvas.onmousemove = function(e){
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    let hover = -1;
+    bars.forEach((b,i)=>{ if (mx>=b.cx-slot/2 && mx<b.cx+slot/2) hover=i; });
+    if (hover<0){ renderFrame(null); hideChartTooltip(); return; }
+    renderFrame(hover);
+    const valStr = opts.money ? fmtMoney(bars[hover].v, opts.currency) : bars[hover].v;
+    showChartTooltip(e.clientX, e.clientY, "<strong>"+esc(String(bars[hover].label))+"</strong><br>"+valStr);
+  };
+  canvas.onmouseleave = function(){ renderFrame(null); hideChartTooltip(); };
 }
+
 function drawDonutChart(canvasId, labels, values){
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
@@ -681,22 +750,46 @@ function drawDonutChart(canvasId, labels, values){
   const colors = ["#22c55e","#ef4444","#eab308"];
   const total = values.reduce((a,b)=>a+b,0);
   const legendEl = document.getElementById(canvasId+"Legend");
-  if (!total){ noDataMsg(ctx,width,height); if (legendEl) legendEl.innerHTML=""; return; }
+  if (!total){ noDataMsg(ctx,width,height); if (legendEl) legendEl.innerHTML=""; canvas.onmousemove=null; canvas.onmouseleave=null; return; }
   const cx = width/2, cy = height/2, outerR = Math.min(width,height)/2 - 8, innerR = outerR*0.6;
-  let start = -Math.PI/2;
-  values.forEach((v,i)=>{
+  let acc = -Math.PI/2;
+  const segs = values.map((v,i)=>{
     const angle = (v/total)*Math.PI*2;
-    ctx.beginPath();
-    ctx.arc(cx,cy,outerR,start,start+angle);
-    ctx.arc(cx,cy,innerR,start+angle,start,true);
-    ctx.closePath();
-    ctx.fillStyle = colors[i%colors.length];
-    ctx.fill();
-    start += angle;
+    const seg = { start:acc, end:acc+angle, relStart:acc+Math.PI/2, relEnd:acc+angle+Math.PI/2, label:labels[i], value:values[i], color:colors[i%colors.length] };
+    acc += angle;
+    return seg;
   });
+
+  function renderFrame(hoverIdx){
+    ctx.clearRect(0,0,width,height);
+    segs.forEach((seg,i)=>{
+      const isHover = i===hoverIdx;
+      const r = isHover ? outerR+3 : outerR;
+      ctx.beginPath();
+      ctx.arc(cx,cy,r,seg.start,seg.end);
+      ctx.arc(cx,cy,innerR,seg.end,seg.start,true);
+      ctx.closePath();
+      ctx.fillStyle = isHover ? lightenColor(seg.color) : seg.color;
+      ctx.fill();
+    });
+  }
+  renderFrame(null);
   if (legendEl){
     legendEl.innerHTML = labels.map((l,i)=>`<span><span class="dot" style="background:${colors[i%colors.length]}"></span>${l} (${values[i]})</span>`).join("");
   }
+  canvas.onmousemove = function(e){
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX-rect.left, my = e.clientY-rect.top;
+    const dx = mx-cx, dy = my-cy, dist = Math.sqrt(dx*dx+dy*dy);
+    if (dist<innerR || dist>outerR+4){ renderFrame(null); hideChartTooltip(); return; }
+    let rel = Math.atan2(dy,dx) + Math.PI/2; if (rel<0) rel += Math.PI*2;
+    const idx = segs.findIndex(s=> rel>=s.relStart && rel<s.relEnd);
+    if (idx<0){ renderFrame(null); hideChartTooltip(); return; }
+    renderFrame(idx);
+    const pct = total>0 ? ((segs[idx].value/total)*100).toFixed(1) : "0.0";
+    showChartTooltip(e.clientX, e.clientY, "<strong>"+esc(segs[idx].label)+"</strong><br>"+segs[idx].value+" ("+pct+"%)");
+  };
+  canvas.onmouseleave = function(){ renderFrame(null); hideChartTooltip(); };
 }
 window.addEventListener("resize", debounce(()=>{ if (afterRenderHooks[currentPage]) afterRenderHooks[currentPage](); }, 200));
 function debounce(fn, wait){ let t; return function(){ clearTimeout(t); t=setTimeout(fn,wait); }; }
@@ -886,7 +979,7 @@ function emptyTrade(){
   return { id:null, date:new Date().toISOString().slice(0,10), day:dayName(new Date()), time:"09:00",
     pair:PAIRS[0], direction:"Buy", session:SESSIONS[0], setup:SETUPS[0], timeframe:TIMEFRAMES[0],
     marketStructure:"Bullish", entry:"", stopLoss:"", takeProfit:"", riskPercent:state.settings.defaultRisk||1, riskDollar:"",
-    rrPlanned:state.settings.defaultRR||2, rrActual:0, reason:"", confirmations:[], result:"Win", pl:0, rMultiple:0,
+    rrPlanned:state.settings.defaultRR||2, rrActual:0, lotSize:1, manualPL:null, reason:"", confirmations:[], result:"Win", pl:0, rMultiple:0,
     balanceBefore:0, balanceAfter:0, emotionBefore:"Calm", emotionAfter:"Neutral", screenshot:null,
     analysis:{marketContext:"",entryReason:"",confirmation:"",whatHappened:"",mistake:"",whatLearned:""}, isBest:false };
 }
@@ -985,6 +1078,10 @@ function tradeFormHtml(trade){
     <label class="field"><span class="field-label">RR Actual</span><input type="number" step="0.1" id="f_rractual" value="${f.rrActual}"/></label>
     <label class="field"><span class="field-label">Risk $ (optional override)</span><input type="number" step="0.01" id="f_riskdollar" value="${f.riskDollar||''}" placeholder="auto from balance"/></label>
   </div>
+  <div class="form-row">
+    <label class="field"><span class="field-label">Lot Size</span><input type="number" step="0.01" min="0.01" id="f_lotsize" value="${f.lotSize||1}"/></label>
+    <label class="field"><span class="field-label">Manual P/L (optional override)</span><input type="number" step="0.01" id="f_manualpl" value="${f.manualPL!==undefined && f.manualPL!==null && f.manualPL!==''?f.manualPL:''}" placeholder="leave empty to auto-calculate"/></label>
+  </div>
   <label class="field"><span class="field-label">Why did I take this trade?</span><textarea id="f_reason" rows="2">${esc(f.reason)}</textarea></label>
   ${sectionTitle("shield","Confirmation")}
   <div class="checkbox-grid">${CONFIRMATIONS.map(c=>`<label class="checkbox-pill"><input type="checkbox" class="f_confirm" value="${c}" ${f.confirmations.includes(c)?'checked':''}/><span>${c}</span></label>`).join("")}</div>
@@ -1047,13 +1144,17 @@ function openTradeModal(trade){
       const riskDollar = manualRisk!=="" ? Number(manualRisk) : Number((balanceBefore*(riskPercent/100)).toFixed(2));
       const rrActual = Number(g("f_rractual").value)||Number(g("f_rrplanned").value)||0;
       const rMultiple = result==="Win" ? rrActual : result==="Loss" ? -1 : 0;
-      const pl = result==="Win" ? riskDollar*rrActual : result==="Loss" ? -riskDollar : 0;
+      const lotSize = Number(g("f_lotsize").value)||1;
+      const manualPLRaw = g("f_manualpl").value;
+      const basePL = manualPLRaw!=="" ? Number(manualPLRaw) : (result==="Win" ? riskDollar*rrActual : result==="Loss" ? -riskDollar : 0);
+      const pl = basePL * lotSize;
       const final = {
         id: trade?trade.id:uid(), date:g("f_date").value, time:g("f_time").value, day:dayName(g("f_date").value),
         pair:g("f_pair").value, direction:g("f_direction").value, session:g("f_session").value, timeframe:g("f_timeframe").value,
         setup:g("f_setup").value, strategy:g("f_setup").value, marketStructure:g("f_structure").value,
         entry:g("f_entry").value, stopLoss:g("f_sl").value, takeProfit:g("f_tp").value,
         riskPercent, riskDollar, rrPlanned:Number(g("f_rrplanned").value)||0, rrActual,
+        lotSize, manualPL: manualPLRaw!=="" ? Number(manualPLRaw) : null,
         reason:g("f_reason").value, confirmations, result, pl:Number(pl.toFixed(2)), rMultiple:Number(rMultiple.toFixed(2)),
         balanceBefore, balanceAfter:Number((balanceBefore+pl).toFixed(2)),
         emotionBefore:g("f_emobefore").value, emotionAfter:g("f_emoafter").value, screenshot:screenshotValue,
@@ -1107,7 +1208,7 @@ function toggleBest(id){
 let backtestFilter = { search:"", page:1 };
 function emptyBacktest(){
   return { id:null, date:new Date().toISOString().slice(0,10), pair:PAIRS[0], session:SESSIONS[0], setup:SETUPS[0],
-    direction:"Buy", entry:"", stopLoss:"", takeProfit:"", rr:2, result:"Win", rMultiple:0, pl:0, screenshot:null, notes:"" };
+    direction:"Buy", entry:"", stopLoss:"", takeProfit:"", rr:2, lotSize:1, manualPL:null, result:"Win", rMultiple:0, pl:0, screenshot:null, notes:"" };
 }
 function renderBacktest(){
   const currency = state.settings.currency;
@@ -1175,6 +1276,10 @@ function openBacktestModal(record){
     <label class="field"><span class="field-label">Stop Loss</span><input type="number" step="0.0001" id="b_sl" value="${f.stopLoss}"/></label>
     <label class="field"><span class="field-label">Take Profit</span><input type="number" step="0.0001" id="b_tp" value="${f.takeProfit}"/></label>
   </div>
+  <div class="form-row">
+    <label class="field"><span class="field-label">Lot Size</span><input type="number" step="0.01" min="0.01" id="b_lotsize" value="${f.lotSize||1}"/></label>
+    <label class="field"><span class="field-label">Manual P/L (optional override)</span><input type="number" step="0.01" id="b_manualpl" value="${f.manualPL!==undefined && f.manualPL!==null && f.manualPL!==''?f.manualPL:''}" placeholder="leave empty to auto-calculate"/></label>
+  </div>
   <label class="field"><span class="field-label">Result</span><select id="b_result"><option ${f.result==='Win'?'selected':''}>Win</option><option ${f.result==='Loss'?'selected':''}>Loss</option><option ${f.result==='Break Even'?'selected':''}>Break Even</option></select></label>
   ${sectionTitle("image","Screenshot")}<div id="b_imagedrop">${imageDropHtml(f.screenshot,"b_screenshot")}</div>
   <label class="field"><span class="field-label">Notes</span><textarea id="b_notes" rows="2">${esc(f.notes)}</textarea></label>
@@ -1189,9 +1294,13 @@ function openBacktestModal(record){
       const result = g("b_result").value;
       const rr = Number(g("b_rr").value)||0;
       const rMultiple = result==="Win"?rr:result==="Loss"?-1:0;
-      const pl = result==="Win"?riskDollar*rr:result==="Loss"?-riskDollar:0;
+      const lotSize = Number(g("b_lotsize").value)||1;
+      const manualPLRaw = g("b_manualpl").value;
+      const basePL = manualPLRaw!=="" ? Number(manualPLRaw) : (result==="Win"?riskDollar*rr:result==="Loss"?-riskDollar:0);
+      const pl = basePL * lotSize;
       const final = { id:record?record.id:uid(), date:g("b_date").value, pair:g("b_pair").value, session:g("b_session").value, setup:g("b_setup").value,
         direction:g("b_direction").value, entry:g("b_entry").value, stopLoss:g("b_sl").value, takeProfit:g("b_tp").value, rr,
+        lotSize, manualPL: manualPLRaw!=="" ? Number(manualPLRaw) : null,
         result, rMultiple:Number(rMultiple.toFixed(2)), pl:Number(pl.toFixed(2)), screenshot:screenshotValue, notes:g("b_notes").value };
       if (record){ state.backtests = state.backtests.map(b=>b.id===record.id?final:b); } else { state.backtests.push(final); }
       saveState(); closeModal(); toast("Backtest record saved."); renderAll();
