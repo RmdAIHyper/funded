@@ -541,7 +541,66 @@ function loadState(){
   } catch(e){}
   return makeEmptyState();
 }
-function saveState(){ try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch(e){} }
+
+/* Durable state storage: IndexedDB has far more capacity than localStorage.
+   Older versions silently ignored QuotaExceededError, which could make newer
+   backtest records appear saved until refresh. Keep localStorage as a fallback
+   and migrate the current state into IndexedDB on startup. */
+const DB_NAME = "TradingPerformanceHubDB";
+const DB_STORE = "appState";
+let stateDbPromise = null;
+let pendingStateWrite = Promise.resolve();
+function openStateDB(){
+  if (!window.indexedDB) return Promise.reject(new Error("IndexedDB is unavailable"));
+  if (stateDbPromise) return stateDbPromise;
+  stateDbPromise = new Promise((resolve,reject)=>{
+    const request = indexedDB.open(DB_NAME,1);
+    request.onupgradeneeded = ()=>{ const db=request.result; if(!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE); };
+    request.onsuccess = ()=>resolve(request.result);
+    request.onerror = ()=>reject(request.error || new Error("Could not open IndexedDB"));
+  });
+  return stateDbPromise;
+}
+function readStateFromDB(){
+  return openStateDB().then(db=>new Promise((resolve,reject)=>{
+    const tx=db.transaction(DB_STORE,"readonly");
+    const req=tx.objectStore(DB_STORE).get("state");
+    req.onsuccess=()=>resolve(req.result || null);
+    req.onerror=()=>reject(req.error || new Error("Could not read saved data"));
+  }));
+}
+function writeStateToDB(snapshot){
+  const copy=JSON.parse(JSON.stringify(snapshot));
+  pendingStateWrite = pendingStateWrite.catch(()=>{}).then(()=>openStateDB()).then(db=>new Promise((resolve,reject)=>{
+    const tx=db.transaction(DB_STORE,"readwrite");
+    tx.objectStore(DB_STORE).put(copy,"state");
+    tx.oncomplete=()=>resolve(true);
+    tx.onerror=()=>reject(tx.error || new Error("Could not save data to IndexedDB"));
+    tx.onabort=()=>reject(tx.error || new Error("Saving data was aborted"));
+  }));
+  pendingStateWrite.catch(err=>console.error("IndexedDB save failed:",err));
+  return pendingStateWrite;
+}
+function saveState(){
+  const snapshot = JSON.parse(JSON.stringify(state));
+  // Save to IndexedDB first; this remains available even when localStorage is full.
+  writeStateToDB(snapshot).catch(()=>{});
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot)); }
+  catch(e) { console.warn("localStorage quota reached; state is being saved to IndexedDB instead.",e); }
+}
+async function initializePersistentState(){
+  try {
+    const stored = await readStateFromDB();
+    if (stored && typeof stored === "object") {
+      state = stored;
+    } else {
+      // One-time migration of all data from the old localStorage-based version.
+      await writeStateToDB(state);
+    }
+  } catch(e) {
+    console.warn("IndexedDB could not be initialized; using localStorage fallback.",e);
+  }
+}
 
 /* ============================================================
    TOAST + CONFIRM
@@ -1886,7 +1945,7 @@ const languageObserver=new MutationObserver(()=>{if(uiLanguage==="ar")applyLangu
 /* ============================================================
    BOOT
    ============================================================ */
-renderAll();
+initializePersistentState().finally(()=>{ renderAll(); applyLanguage(); });
 
 })();
 </script>
